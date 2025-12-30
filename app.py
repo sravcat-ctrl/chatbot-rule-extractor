@@ -26,20 +26,20 @@ if "OPENAI_API_KEY" not in st.secrets:
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 # ==============================
-# SESSION STATE FOR CHAT
+# SESSION STATE
 # ==============================
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
 # ==============================
-# CHAT DISPLAY
+# CHAT HISTORY
 # ==============================
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
 # ==============================
-# FILE UPLOAD (TXT + PDF)
+# FILE UPLOAD
 # ==============================
 uploaded_file = st.file_uploader(
     "📄 Upload programming guidelines (.txt or .pdf)",
@@ -60,7 +60,9 @@ def read_file(file):
         reader = PdfReader(file)
         text = ""
         for page in reader.pages:
-            text += page.extract_text() + " "
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + " "
         return text
     else:
         return file.read().decode("utf-8")
@@ -72,7 +74,7 @@ def clean_text(text):
     return re.sub(r'\s+', ' ', text).strip()
 
 # ==============================
-# CHUNK TEXT (NO LANGCHAIN)
+# CHUNK TEXT
 # ==============================
 def chunk_text(text, chunk_size=800, overlap=150):
     chunks = []
@@ -87,7 +89,23 @@ def chunk_text(text, chunk_size=800, overlap=150):
     return chunks
 
 # ==============================
-# RULE EXTRACTION FUNCTION
+# SAFE JSON EXTRACTOR
+# ==============================
+def safe_json_parse(text):
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # Extract JSON block using regex
+        match = re.search(r'\{[\s\S]*\}', text)
+        if match:
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                return {"rules": []}
+        return {"rules": []}
+
+# ==============================
+# RULE EXTRACTION
 # ==============================
 def extract_rules(chunk, index):
     prompt = f"""
@@ -95,7 +113,10 @@ You are an expert programming standards analyst.
 
 Extract ALL programming rules from the text below.
 Do not miss any rule.
+
 Return ONLY valid JSON.
+No explanations.
+No markdown.
 
 JSON format:
 {{
@@ -115,10 +136,11 @@ TEXT:
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.1
+        temperature=0.0
     )
 
-    return json.loads(response.choices[0].message.content)
+    raw_output = response.choices[0].message.content
+    return safe_json_parse(raw_output)
 
 # ==============================
 # PROCESS BUTTON
@@ -134,7 +156,6 @@ if uploaded_file and st.button("🚀 Extract Rules"):
     with st.chat_message("assistant"):
         st.markdown("✂️ Chunking document...")
     chunks = chunk_text(text)
-    time.sleep(1)
 
     progress = st.progress(0)
     all_rules = []
@@ -144,14 +165,16 @@ if uploaded_file and st.button("🚀 Extract Rules"):
         all_rules.extend(result.get("rules", []))
         progress.progress(int((i + 1) / len(chunks) * 100))
 
-    # Deduplicate
+    # ==============================
+    # DEDUPLICATE RULES
+    # ==============================
     unique_rules = []
     seen = set()
 
     for rule in all_rules:
-        key = rule["rule"].lower()
-        if key not in seen:
-            seen.add(key)
+        rule_text = rule.get("rule", "").lower()
+        if rule_text and rule_text not in seen:
+            seen.add(rule_text)
             unique_rules.append(rule)
 
     final_output = {"rules": unique_rules}
@@ -171,3 +194,4 @@ if uploaded_file and st.button("🚀 Extract Rules"):
         file_name="extracted_rules.json",
         mime="application/json"
     )
+
