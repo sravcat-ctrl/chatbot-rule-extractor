@@ -3,53 +3,76 @@ import json
 import time
 import re
 from openai import OpenAI
+from pypdf import PdfReader
 
 # ==============================
 # PAGE CONFIG
 # ==============================
 st.set_page_config(
-    page_title="Programming Rule Extractor",
+    page_title="Rule Extractor Chatbot",
     page_icon="🤖",
     layout="centered"
 )
 
-st.title("🤖 Programming Rules Extractor")
-st.write("Upload messy programming guidelines → Get clean rules as JSON")
+st.title("🤖 Programming Rules Extractor Chatbot")
 
 # ==============================
 # LOAD OPENAI KEY FROM SECRETS
 # ==============================
 if "OPENAI_API_KEY" not in st.secrets:
-    st.error("OpenAI API key is not configured in Streamlit secrets.")
+    st.error("OpenAI API key not configured in Streamlit secrets.")
     st.stop()
 
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 # ==============================
-# FILE UPLOAD
+# SESSION STATE FOR CHAT
+# ==============================
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# ==============================
+# CHAT DISPLAY
+# ==============================
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+# ==============================
+# FILE UPLOAD (TXT + PDF)
 # ==============================
 uploaded_file = st.file_uploader(
-    "📄 Upload guidelines file (.txt)",
-    type=["txt"]
+    "📄 Upload programming guidelines (.txt or .pdf)",
+    type=["txt", "pdf"]
 )
 
-if not uploaded_file:
-    st.info("Please upload a .txt file to begin.")
-    st.stop()
+if uploaded_file:
+    st.session_state.messages.append({
+        "role": "user",
+        "content": f"Uploaded file: **{uploaded_file.name}**"
+    })
 
-raw_text = uploaded_file.read().decode("utf-8")
+# ==============================
+# READ FILE
+# ==============================
+def read_file(file):
+    if file.type == "application/pdf":
+        reader = PdfReader(file)
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text() + " "
+        return text
+    else:
+        return file.read().decode("utf-8")
 
 # ==============================
 # CLEAN TEXT
 # ==============================
 def clean_text(text):
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip()
-
-cleaned_text = clean_text(raw_text)
+    return re.sub(r'\s+', ' ', text).strip()
 
 # ==============================
-# SIMPLE CHUNKING (NO LANGCHAIN)
+# CHUNK TEXT (NO LANGCHAIN)
 # ==============================
 def chunk_text(text, chunk_size=800, overlap=150):
     chunks = []
@@ -62,24 +85,6 @@ def chunk_text(text, chunk_size=800, overlap=150):
         start = end - overlap
 
     return chunks
-
-# ==============================
-# PROGRESS UI
-# ==============================
-progress = st.progress(0)
-status = st.empty()
-
-status.write("🧹 Cleaning document...")
-time.sleep(1)
-progress.progress(20)
-
-# ==============================
-# CHUNK DOCUMENT
-# ==============================
-status.write("✂️ Chunking document...")
-chunks = chunk_text(cleaned_text)
-time.sleep(1)
-progress.progress(40)
 
 # ==============================
 # RULE EXTRACTION FUNCTION
@@ -116,56 +121,53 @@ TEXT:
     return json.loads(response.choices[0].message.content)
 
 # ==============================
-# EXTRACT RULES FROM ALL CHUNKS
+# PROCESS BUTTON
 # ==============================
-status.write("🧠 Extracting rules...")
-all_rules = []
+if uploaded_file and st.button("🚀 Extract Rules"):
+    with st.chat_message("assistant"):
+        st.markdown("📄 Reading document...")
+    time.sleep(1)
 
-for i, chunk in enumerate(chunks):
-    result = extract_rules(chunk, i)
-    all_rules.extend(result.get("rules", []))
-    progress.progress(40 + int((i + 1) / len(chunks) * 40))
+    text = read_file(uploaded_file)
+    text = clean_text(text)
 
-# ==============================
-# DEDUPLICATE RULES
-# ==============================
-status.write("🔍 Removing duplicate rules...")
-unique_rules = []
-seen = set()
+    with st.chat_message("assistant"):
+        st.markdown("✂️ Chunking document...")
+    chunks = chunk_text(text)
+    time.sleep(1)
 
-for rule in all_rules:
-    rule_text = rule.get("rule", "").lower()
-    if rule_text and rule_text not in seen:
-        seen.add(rule_text)
-        unique_rules.append(rule)
+    progress = st.progress(0)
+    all_rules = []
 
-time.sleep(1)
-progress.progress(90)
+    for i, chunk in enumerate(chunks):
+        result = extract_rules(chunk, i)
+        all_rules.extend(result.get("rules", []))
+        progress.progress(int((i + 1) / len(chunks) * 100))
 
-# ==============================
-# FINAL OUTPUT
-# ==============================
-final_output = {
-    "rules": unique_rules
-}
+    # Deduplicate
+    unique_rules = []
+    seen = set()
 
-json_data = json.dumps(final_output, indent=2)
+    for rule in all_rules:
+        key = rule["rule"].lower()
+        if key not in seen:
+            seen.add(key)
+            unique_rules.append(rule)
 
-progress.progress(100)
-status.write("✅ Extraction complete!")
+    final_output = {"rules": unique_rules}
+    json_data = json.dumps(final_output, indent=2)
 
-# ==============================
-# DISPLAY RESULTS
-# ==============================
-st.subheader("📋 Extracted Rules")
-st.json(final_output)
+    st.session_state.messages.append({
+        "role": "assistant",
+        "content": f"✅ Extraction complete! **{len(unique_rules)} rules found.**"
+    })
 
-# ==============================
-# DOWNLOAD BUTTON
-# ==============================
-st.download_button(
-    label="⬇️ Download JSON",
-    data=json_data,
-    file_name="extracted_rules.json",
-    mime="application/json"
-)
+    with st.chat_message("assistant"):
+        st.json(final_output)
+
+    st.download_button(
+        label="⬇️ Download JSON",
+        data=json_data,
+        file_name="extracted_rules.json",
+        mime="application/json"
+    )
